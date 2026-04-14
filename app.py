@@ -64,9 +64,14 @@ def process_and_aggregate_df(df, sum_cols, first_cols=None):
     df['SKU'] = df['SKU'].apply(normalize_sku)
     df = df[df['SKU'] != ""].copy()
     
-    # 枝番（ハイフン以降）をカットして親品番にする
+   # 枝番（ハイフン以降）をカットして親品番にする
     # ※正規化により、全角ハイフン等も既に半角ハイフンに統一されている
     df['SKU'] = df['SKU'].str.split('-').str[0]
+    
+    # ーーーここから追加ーーー
+    # 品番の末尾にある「SET」という文字列を取り除く（正規表現を使用）
+    df['SKU'] = df['SKU'].str.replace(r'SET$', '', regex=True)
+    # ーーーここまで追加ーーー
     
     # 分割後に再度末尾などの空白をケア（念のため）
     df['SKU'] = df['SKU'].str.strip()
