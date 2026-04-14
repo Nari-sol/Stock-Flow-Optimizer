@@ -64,14 +64,13 @@ def process_and_aggregate_df(df, sum_cols, first_cols=None):
     df['SKU'] = df['SKU'].apply(normalize_sku)
     df = df[df['SKU'] != ""].copy()
     
-   # 枝番（ハイフン以降）をカットして親品番にする
-    # ※正規化により、全角ハイフン等も既に半角ハイフンに統一されている
+    # 枝番（ハイフンとアンダーバーの両方）をカットして親品番にする
     df['SKU'] = df['SKU'].str.split('-').str[0]
+    df['SKU'] = df['SKU'].str.split('_').str[0]
     
-    # ーーーここから追加ーーー
-    # 品番の末尾にある「SET」という文字列を取り除く（正規表現を使用）
-    df['SKU'] = df['SKU'].str.replace(r'SET$', '', regex=True)
-    # ーーーここまで追加ーーー
+    # 品番の末尾にある「SET」や「SET2」などを確実に取り除く
+    # （\d* をつけることで、SETの後ろの数字ごと消し去ります）
+    df['SKU'] = df['SKU'].str.replace(r'SET\d*$', '', regex=True)
     
     # 分割後に再度末尾などの空白をケア（念のため）
     df['SKU'] = df['SKU'].str.strip()
@@ -128,10 +127,9 @@ def load_all_data(master_file, ys_files, rk_file, az_files):
         # 2. 各モール
         mall_data = []
         configs = [
-            # Yahooの販売数列の候補に「注文点数合計」を追加しました
             (ys_files, 'YS_売上', ['商品コード', 'SKU', '個別商品コード', '商品ID'], ['注文点数合計', '販売数', '売上数量', '数量'], 0),
             (rk_file, '楽天_売上', ['商品管理番号', 'SKU', '商品番号'], ['売上個数', '販売数', '販売個数'], 6),
-            (az_files, 'Amazon_売上', ['SKU', '商品コード', '出品者SKU'], ['注文された商品点数', '販売数'], 0)
+            (az_files, 'Amazon_売上', ['SKU', '商品コード', '出品者SKU'], ['注文された商品点数', '販売数', '数量'], 0)
         ]
         
         for files, col_name, skus, vals, skip in configs:
@@ -193,31 +191,29 @@ if master_f:
             target_df = df[(df['現在の在庫数'] >= baseline) & (df['YS_売上']==0) & (df['楽天_売上']==0) & (df['Amazon_売上']==0)].copy()
             target_df = target_df.sort_values('現在の在庫数', ascending=False)
         else:
-            st.info("**【需要の偏りを抽出モード】**\n* **概要**: 一部で売れているが他で止まっている商品を特定。\n* **対象基準**: 在庫1個以上。\n* **活用シーン**: 在庫移動、広告戦略の最適化。")
+            st.info("【需要の偏りを抽出モード】\n・概要: モール間で販売数に大きな差がある商品を特定。\n・対象基準: 在庫1個以上。\n・活用シーン: 在庫移動、広告戦略の最適化。")
+            
+            # まず全データに対して合計とスコアを計算する
             df['合計売上'] = df['YS_売上'] + df['楽天_売上'] + df['Amazon_売上']
-            target_df = df[(df['現在の在庫数'] >= 1) & (df['合計売上'] >= 1) & ((df['YS_売上']==0)|(df['楽天_売上']==0)|(df['Amazon_売上']==0))].copy()
-            target_df['機会損失スコア'] = target_df[['YS_売上','楽天_売上','Amazon_売上']].max(axis=1) - target_df[['YS_売上','楽天_売上','Amazon_売上']].min(axis=1)
-            # ここで整数型に変換します
+            df['機会損失スコア'] = df[['YS_売上','楽天_売上','Amazon_売上']].max(axis=1) - df[['YS_売上','楽天_売上','Amazon_売上']].min(axis=1)
+            
+            # スライダーで「どれくらいの差があったら抽出するか」を決められるようにする
+            bias_threshold = st.slider("偏りと判定するスコア（最大と最小の差）", 1, 500, 30)
+            
+            # 0個縛りをなくし、スコアが基準値以上のものを抽出する
+            target_df = df[(df['現在の在庫数'] >= 1) & (df['合計売上'] >= 1) & (df['機会損失スコア'] >= bias_threshold)].copy()
+            
             target_df['合計売上'] = target_df['合計売上'].fillna(0).astype(int)
             target_df['機会損失スコア'] = target_df['機会損失スコア'].fillna(0).astype(int)
-            target_df = target_df.sort_values('機会損失スコア', ascending=False)
-            # 各行の売上状況からテキストを生成する関数
-            def generate_status_text(row):
-                selling = []
-                stopped = []
-                
-                if row['YS_売上'] > 0: selling.append('Yahoo')
-                else: stopped.append('Yahoo')
-                
-                if row['楽天_売上'] > 0: selling.append('楽天')
-                else: stopped.append('楽天')
-                
-                if row['Amazon_売上'] > 0: selling.append('Amazon')
-                else: stopped.append('Amazon')
-                
-                return f"売：{','.join(selling)} / 止：{','.join(stopped)}"
 
-            # 状況テキストを生成して新しい列に追加
+            # 各行の売上状況テキストを「0かどうか」ではなく「順位」で判定するように進化
+            def generate_status_text(row):
+                sales_dict = {'Yahoo': row['YS_売上'], '楽天': row['楽天_売上'], 'Amazon': row['Amazon_売上']}
+                # 売上が高い順に並び替え
+                sorted_sales = sorted(sales_dict.items(), key=lambda item: item[1], reverse=True)
+                # 1位を主力、3位を課題として表示
+                return f"主力:{sorted_sales[0][0]} / 課題:{sorted_sales[2][0]}"
+
             target_df['偏り状況'] = target_df.apply(generate_status_text, axis=1)
             
             # スコア順に並び替え
