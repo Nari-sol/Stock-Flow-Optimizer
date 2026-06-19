@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import unicodedata
+import re
 
 # ページ設定
 st.set_page_config(page_title="Stock-Flow Optimizer", layout="wide")
@@ -23,6 +24,15 @@ def normalize_sku(text):
         s = s.replace(char, '-')
     # 品番内のすべての空白（全角半角スペース、タブ、改行）を完全に削除
     s = "".join(s.split())
+    return s
+
+def normalize_month(sheet_name):
+    """シート名から数値部分を抽出して『X月』の形式に統一する。数値がない場合はそのままトリムして返す"""
+    if pd.isna(sheet_name): return "不明"
+    s = str(sheet_name).strip()
+    match = re.search(r'(\d+)', s)
+    if match:
+        return f"{int(match.group(1))}月"
     return s
 
 def clean_num(val):
@@ -51,8 +61,8 @@ def categorize_item(name):
 # データ処理の核
 # -----------------------------------------------------------------------------
 
-def process_and_aggregate_df(df, sum_cols, first_cols=None):
-    """品番を親品番で集約し、数値は合算、属性は保持する"""
+def process_and_aggregate_df(df, sum_cols, first_cols=None, group_cols=['SKU']):
+    """品番（および指定列）で集約し、数値は合算、属性は保持する"""
     if df is None or df.empty: return None
     
     # 必要列の確保
@@ -83,7 +93,7 @@ def process_and_aggregate_df(df, sum_cols, first_cols=None):
         for col in first_cols:
             if col in df.columns: agg_rules[col] = 'first'
             
-    return df.groupby('SKU').agg(agg_rules).reset_index()
+    return df.groupby(group_cols).agg(agg_rules).reset_index()
 
 def robust_rename(df, mapping):
     """カラム名の揺れを吸収"""
@@ -99,7 +109,7 @@ def robust_rename(df, mapping):
     return df.rename(columns=new_map)
 
 @st.cache_data
-def load_all_data(master_file, ys_files, rk_file, az_files):
+def load_all_data(master_file, ys_files, rk_files, az_files):
     """すべてのデータを統合する"""
     try:
         def read_csv(f, skip=0):
@@ -125,37 +135,128 @@ def load_all_data(master_file, ys_files, rk_file, az_files):
         df_master = process_and_aggregate_df(m_raw, ['現在の在庫数', '在庫金額'], ['カテゴリ'])
 
         # 2. 各モール
-        mall_data = []
-        configs = [
-            (ys_files, 'YS_売上', ['商品コード', 'SKU', '個別商品コード', '商品ID'], ['注文点数合計', '販売数', '売上数量', '数量'], 0),
-            (rk_file, '楽天_売上', ['商品管理番号', 'SKU', '商品番号'], ['売上個数', '販売数', '販売個数'], 6),
-            (az_files, 'Amazon_売上', ['SKU', '商品コード', '出品者SKU'], ['注文された商品点数', '販売数', '数量'], 0)
-        ]
+        # 各モールデータ読み込み（シートごとに月を付与）
+        ys_dfs = []
+        ys_f_list = ys_files if isinstance(ys_files, list) else ([ys_files] if ys_files else [])
+        for ys_f in ys_f_list:
+            if ys_f is not None:
+                try:
+                    ys_f.seek(0)
+                    excel_sheets = pd.read_excel(ys_f, sheet_name=None)
+                    for sheet_name, sheet_df in excel_sheets.items():
+                        if sheet_df is not None and not sheet_df.empty:
+                            sheet_df = robust_rename(sheet_df, {
+                                'SKU': ['商品コード', 'SKU', '個別商品コード', '商品ID'],
+                                '販売数': ['注文点数合計', '販売数', '売上数量', '数量']
+                            })
+                            if 'SKU' in sheet_df.columns:
+                                if '販売数' not in sheet_df.columns: 
+                                    sheet_df['販売数'] = 0
+                                sheet_df['月'] = normalize_month(sheet_name)
+                                ys_dfs.append(sheet_df[['SKU', '販売数', '月']])
+                except Exception as e:
+                    st.error(f"Yahoo Excelファイル ({ys_f.name}) の読み込み中にエラーが発生しました: {e}")
+
+        rk_dfs = []
+        rk_f_list = rk_files if isinstance(rk_files, list) else ([rk_files] if rk_files else [])
+        for rk_f in rk_f_list:
+            if rk_f is not None:
+                try:
+                    rk_f.seek(0)
+                    excel_sheets = pd.read_excel(rk_f, sheet_name=None)
+                    for sheet_name, sheet_df in excel_sheets.items():
+                        if sheet_df is not None and not sheet_df.empty:
+                            sheet_df = robust_rename(sheet_df, {
+                                'SKU': ['商品管理番号', 'SKU', '商品番号'],
+                                '販売数': ['売上個数', '販売数', '販売個数']
+                            })
+                            if 'SKU' in sheet_df.columns:
+                                if '販売数' not in sheet_df.columns: 
+                                    sheet_df['販売数'] = 0
+                                sheet_df['月'] = normalize_month(sheet_name)
+                                rk_dfs.append(sheet_df[['SKU', '販売数', '月']])
+                except Exception as e:
+                    st.error(f"楽天 Excelファイル ({rk_f.name}) の読み込み中にエラーが発生しました: {e}")
+
+        az_dfs = []
+        az_f_list = az_files if isinstance(az_files, list) else ([az_files] if az_files else [])
+        for az_f in az_f_list:
+            if az_f is not None:
+                try:
+                    az_f.seek(0)
+                    excel_sheets = pd.read_excel(az_f, sheet_name=None)
+                    for sheet_name, sheet_df in excel_sheets.items():
+                        if sheet_df is not None and not sheet_df.empty:
+                            sheet_df = robust_rename(sheet_df, {
+                                'SKU': ['SKU', '商品コード', '出品者SKU'], 
+                                '販売数': ['注文された商品点数', '販売数', '数量']
+                            })
+                            if 'SKU' in sheet_df.columns:
+                                if '販売数' not in sheet_df.columns: 
+                                    sheet_df['販売数'] = 0
+                                sheet_df['月'] = normalize_month(sheet_name)
+                                az_dfs.append(sheet_df[['SKU', '販売数', '月']])
+                except Exception as e:
+                    st.error(f"Amazon Excelファイル ({az_f.name}) の読み込み中にエラーが発生しました: {e}")
+
+        # すべての存在する「月」をユニークに抽出
+        all_months = set()
+        for df_list in [ys_dfs, rk_dfs, az_dfs]:
+            for tmp in df_list:
+                if '月' in tmp.columns:
+                    all_months.update(tmp['月'].dropna().unique())
         
-        for files, col_name, skus, vals, skip in configs:
-            f_list = files if isinstance(files, list) else ([files] if files else [])
-            dfs = []
-            for f in f_list:
-                tmp = read_csv(f, skip=skip)
-                if tmp is not None:
-                    tmp = robust_rename(tmp, {'SKU': skus, '販売数': vals})
-                    if 'SKU' in tmp.columns:
-                        if '販売数' not in tmp.columns: tmp['販売数'] = 0
-                        dfs.append(tmp[['SKU', '販売数']])
+        if not all_months:
+            all_months = {'不明'}
             
-            if dfs:
-                df_c = pd.concat(dfs, ignore_index=True).rename(columns={'販売数': col_name})
-                mall_data.append(process_and_aggregate_df(df_c, [col_name]))
-            else:
-                mall_data.append(None)
+        all_months = sorted(list(all_months))
+
+        # マスターの全SKUとall_monthsのデカルト積（ベースフレーム）を作成
+        sku_month_base = []
+        if df_master is not None and not df_master.empty:
+            for sku in df_master['SKU'].unique():
+                for m in all_months:
+                    sku_month_base.append({'SKU': sku, '月': m})
+        df_base = pd.DataFrame(sku_month_base)
+
+        if df_base.empty:
+            return None
+
+        # 各モールデータを ['SKU', '月'] で集約
+        mall_data = []
+        
+        # Yahoo
+        if ys_dfs:
+            ys_concat = pd.concat(ys_dfs, ignore_index=True).rename(columns={'販売数': 'YS_売上'})
+            ys_agg = process_and_aggregate_df(ys_concat, ['YS_売上'], group_cols=['SKU', '月'])
+            mall_data.append((ys_agg, 'YS_売上'))
+        else:
+            mall_data.append((None, 'YS_売上'))
+
+        # 楽天
+        if rk_dfs:
+            rk_concat = pd.concat(rk_dfs, ignore_index=True).rename(columns={'販売数': '楽天_売上'})
+            rk_agg = process_and_aggregate_df(rk_concat, ['楽天_売上'], group_cols=['SKU', '月'])
+            mall_data.append((rk_agg, '楽天_売上'))
+        else:
+            mall_data.append((None, '楽天_売上'))
+
+        # Amazon
+        if az_dfs:
+            az_concat = pd.concat(az_dfs, ignore_index=True).rename(columns={'販売数': 'Amazon_売上'})
+            az_agg = process_and_aggregate_df(az_concat, ['Amazon_売上'], group_cols=['SKU', '月'])
+            mall_data.append((az_agg, 'Amazon_売上'))
+        else:
+            mall_data.append((None, 'Amazon_売上'))
 
         # 結合
-        if df_master is None: return None
-        res = df_master.copy()
-        for m_df in mall_data:
+        res = pd.merge(df_base, df_master, on='SKU', how='left')
+        for m_df, col in mall_data:
             if m_df is not None:
-                res = pd.merge(res, m_df, on='SKU', how='left')
-        
+                res = pd.merge(res, m_df, on=['SKU', '月'], how='left')
+            else:
+                res[col] = 0.0
+
         return res.fillna(0)
     except Exception as e:
         st.error(f"データ統合中にエラーが発生しました: {e}")
@@ -169,12 +270,12 @@ st.title("📦 Stock-Flow Optimizer")
 
 st.sidebar.header("📂 データ読み込み")
 master_f = st.sidebar.file_uploader("1. マスター (CSV)", type="csv")
-ys_fs = st.sidebar.file_uploader("2. Yahoo (CSV / 複数可)", type="csv", accept_multiple_files=True)
-rk_f = st.sidebar.file_uploader("3. 楽天 (CSV)", type="csv")
-az_fs = st.sidebar.file_uploader("4. Amazon (CSV / 複数可)", type="csv", accept_multiple_files=True)
+ys_fs = st.sidebar.file_uploader("2. Yahoo (Excel / 複数可)", type=["xlsx", "xls"], accept_multiple_files=True)
+rk_fs = st.sidebar.file_uploader("3. 楽天 (Excel / 複数可)", type=["xlsx", "xls"], accept_multiple_files=True)
+az_fs = st.sidebar.file_uploader("4. Amazon (Excel / 複数可)", type=["xlsx", "xls"], accept_multiple_files=True)
 
 if master_f:
-    df = load_all_data(master_f, ys_fs, rk_f, az_fs)
+    df = load_all_data(master_f, ys_fs, rk_fs, az_fs)
     if df is not None:
         # カテゴリフィルタ
         unique_cats = sorted(df['カテゴリ'].unique())
@@ -182,42 +283,92 @@ if master_f:
         if sel_cats: df = df[df['カテゴリ'].isin(sel_cats)]
 
         st.write("---")
-        mode = st.radio("🔍 分析モード", ["滞留在庫の抽出", "需要の偏りを抽出"], horizontal=True, key="mode_radio", index=0)
+        mode = st.radio("🔍 分析モード", ["滞留在庫の抽出", "需要の偏りを抽出", "月別効果検証（比較）"], horizontal=True, key="mode_radio", index=0)
         
-        # 解説 (絶対に維持)
-        if mode == "滞留在庫の抽出":
-            baseline = st.slider("在庫の基準値", 0, 100, 10)
-            st.info(f"**【滞留在庫の抽出モード】**\n* **概要**: 全モールで売上0の商品を特定。\n* **対象基準**: 在庫 **{baseline}個以上**。\n* **活用シーン**: 長期滞留の特定、セール検討。")
-            target_df = df[(df['現在の在庫数'] >= baseline) & (df['YS_売上']==0) & (df['楽天_売上']==0) & (df['Amazon_売上']==0)].copy()
-            target_df = target_df.sort_values('現在の在庫数', ascending=False)
-        else:
-            st.info("【需要の偏りを抽出モード】\n・概要: モール間で販売数に大きな差がある商品を特定。\n・対象基準: 在庫1個以上。\n・活用シーン: 在庫移動、広告戦略の最適化。")
-            
-            # まず全データに対して合計とスコアを計算する
-            df['合計売上'] = df['YS_売上'] + df['楽天_売上'] + df['Amazon_売上']
-            df['機会損失スコア'] = df[['YS_売上','楽天_売上','Amazon_売上']].max(axis=1) - df[['YS_売上','楽天_売上','Amazon_売上']].min(axis=1)
-            
-            # スライダーで「どれくらいの差があったら抽出するか」を決められるようにする
-            bias_threshold = st.slider("偏りと判定するスコア（最大と最小の差）", 1, 500, 30)
-            
-            # 0個縛りをなくし、スコアが基準値以上のものを抽出する
-            target_df = df[(df['現在の在庫数'] >= 1) & (df['合計売上'] >= 1) & (df['機会損失スコア'] >= bias_threshold)].copy()
-            
-            target_df['合計売上'] = target_df['合計売上'].fillna(0).astype(int)
-            target_df['機会損失スコア'] = target_df['機会損失スコア'].fillna(0).astype(int)
+        unique_months = sorted(df['月'].unique())
 
-            # 各行の売上状況テキストを「0かどうか」ではなく「順位」で判定するように進化
-            def generate_status_text(row):
-                sales_dict = {'Yahoo': row['YS_売上'], '楽天': row['楽天_売上'], 'Amazon': row['Amazon_売上']}
-                # 売上が高い順に並び替え
-                sorted_sales = sorted(sales_dict.items(), key=lambda item: item[1], reverse=True)
-                # 1位を主力、3位を課題として表示
-                return f"主力:{sorted_sales[0][0]} / 課題:{sorted_sales[2][0]}"
+        if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
+            # 通常モード: 表示対象の月を1つ選択
+            selected_month = st.selectbox("📅 表示対象の月を選択", unique_months, index=0)
+            df_active = df[df['月'] == selected_month].copy()
 
-            target_df['偏り状況'] = target_df.apply(generate_status_text, axis=1)
+            if mode == "滞留在庫の抽出":
+                baseline = st.slider("在庫の基準値", 0, 100, 10)
+                st.info(f"**【滞留在庫の抽出モード】**\n* **対象月**: {selected_month}\n* **概要**: 全モールで売上0の商品を特定。\n* **対象基準**: 在庫 **{baseline}個以上**。\n* **活用シーン**: 長期滞留の特定、セール検討。")
+                target_df = df_active[(df_active['現在の在庫数'] >= baseline) & (df_active['YS_売上']==0) & (df_active['楽天_売上']==0) & (df_active['Amazon_売上']==0)].copy()
+                target_df = target_df.sort_values('現在の在庫数', ascending=False)
+            else:
+                st.info(f"**【需要の偏りを抽出モード】**\n* **対象月**: {selected_month}\n* **概要**: モール間で販売数に大きな差がある商品を特定。\n* **対象基準**: 在庫1個以上。\n* **活用シーン**: 在庫移動、広告戦略の最適化。")
+                
+                # まず全データに対して合計とスコアを計算する
+                df_active['合計売上'] = df_active['YS_売上'] + df_active['楽天_売上'] + df_active['Amazon_売上']
+                df_active['機会損失スコア'] = df_active[['YS_売上','楽天_売上','Amazon_売上']].max(axis=1) - df_active[['YS_売上','楽天_売上','Amazon_売上']].min(axis=1)
+                
+                # スライダーで「どれくらいの差があったら抽出するか」を決められるようにする
+                bias_threshold = st.slider("偏りと判定するスコア（最大と最小の差）", 1, 500, 30)
+                
+                # 0個縛りをなくし、スコアが基準値以上のものを抽出する
+                target_df = df_active[(df_active['現在の在庫数'] >= 1) & (df_active['合計売上'] >= 1) & (df_active['機会損失スコア'] >= bias_threshold)].copy()
+                
+                target_df['合計売上'] = target_df['合計売上'].fillna(0).astype(int)
+                target_df['機会損失スコア'] = target_df['機会損失スコア'].fillna(0).astype(int)
+
+                # 各行の売上状況テキストを「0かどうか」ではなく「順位」で判定するように進化
+                def generate_status_text(row):
+                    sales_dict = {'Yahoo': row['YS_売上'], '楽天': row['楽天_売上'], 'Amazon': row['Amazon_売上']}
+                    # 売上が高い順に並び替え
+                    sorted_sales = sorted(sales_dict.items(), key=lambda item: item[1], reverse=True)
+                    # 1位を主力、3位を課題として表示
+                    return f"主力:{sorted_sales[0][0]} / 課題:{sorted_sales[2][0]}"
+
+                target_df['偏り状況'] = target_df.apply(generate_status_text, axis=1)
+                
+                # スコア順に並び替え
+                target_df = target_df.sort_values('機会損失スコア', ascending=False)
+
+        else: # 月別効果検証（比較）
+            st.info("**【月別効果検証モード】**\n* **概要**: 選択した2つの月における売上の変化（伸び率や他モールへの波及効果）を品番ごとに比較検証します。")
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                month_src = st.selectbox("📅 比較元（施策前）の月", unique_months, index=0)
+            with col_m2:
+                # デフォルトで比較元の次の月を選択（あれば）
+                default_dest_idx = min(unique_months.index(month_src) + 1, len(unique_months) - 1) if month_src in unique_months else 0
+                month_dst = st.selectbox("📅 比較先（施策後）の月", unique_months, index=default_dest_idx)
+
+            # 比較元のデータを抽出
+            df_src = df[df['月'] == month_src][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
+            df_src = df_src.rename(columns={
+                'YS_売上': f'{month_src}_YS_売上',
+                '楽天_売上': f'{month_src}_楽天_売上',
+                'Amazon_売上': f'{month_src}_Amazon_売上'
+            })
             
-            # スコア順に並び替え
-            target_df = target_df.sort_values('機会損失スコア', ascending=False)
+            # 比較先のデータを抽出
+            df_dst = df[df['月'] == month_dst][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
+            df_dst = df_dst.rename(columns={
+                'YS_売上': f'{month_dst}_YS_売上',
+                '楽天_売上': f'{month_dst}_楽天_売上',
+                'Amazon_売上': f'{month_dst}_Amazon_売上'
+            })
+            
+            # マスター情報（月情報を含まないユニークなもの）
+            df_meta = df[['SKU', 'カテゴリ', '現在の在庫数', '在庫金額']].drop_duplicates(subset=['SKU']).copy()
+            
+            # マージ
+            target_df = pd.merge(df_meta, df_src, on='SKU', how='left')
+            target_df = pd.merge(target_df, df_dst, on='SKU', how='left')
+            target_df = target_df.fillna(0)
+            
+            # 合計売上の計算
+            target_df[f'{month_src}_合計売上'] = target_df[f'{month_src}_YS_売上'] + target_df[f'{month_src}_楽天_売上'] + target_df[f'{month_src}_Amazon_売上']
+            target_df[f'{month_dst}_合計売上'] = target_df[f'{month_dst}_YS_売上'] + target_df[f'{month_dst}_楽天_売上'] + target_df[f'{month_dst}_Amazon_売上']
+            
+            # 売上変化量（施策前後の差分）
+            target_df['売上変化量'] = target_df[f'{month_dst}_合計売上'] - target_df[f'{month_src}_合計売上']
+            
+            # 変化量順にソート
+            target_df = target_df.sort_values('売上変化量', ascending=False)
 
         # サマリー
         st.subheader("📊 分析サマリー")
@@ -225,25 +376,59 @@ if master_f:
         c1.metric("抽出品番数", f"{len(target_df)} 件")
         c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
         c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
-        c4.metric("対象品合計売上", f"{int(target_df[['YS_売上','楽天_売上','Amazon_売上']].sum().sum()):,}")
+        
+        if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
+            c4.metric("対象品合計売上", f"{int(target_df[['YS_売上','楽天_売上','Amazon_売上']].sum().sum()):,}")
+        else:
+            c4.metric("総売上変化量", f"{int(target_df['売上変化量'].sum()):+}")
 
         # スタイリング表示
         def style_df(d):
-            cols = ['YS_売上','楽天_売上','Amazon_売上','現在の在庫数','在庫金額', '合計売上', '機会損失スコア', '偏り状況']
-            s_cols = ['YS_売上','楽天_売上','Amazon_売上']
+            cols = ['現在の在庫数', '在庫金額', '偏り状況']
+            s_cols = []
+            
+            if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
+                cols += ['YS_売上','楽天_売上','Amazon_売上', '合計売上', '機会損失スコア']
+                s_cols += ['YS_売上','楽天_売上','Amazon_売上']
+            else:
+                cols += [
+                    f'{month_src}_YS_売上', f'{month_src}_楽天_売上', f'{month_src}_Amazon_売上', f'{month_src}_合計売上',
+                    f'{month_dst}_YS_売上', f'{month_dst}_楽天_売上', f'{month_dst}_Amazon_売上', f'{month_dst}_合計売上',
+                    '売上変化量'
+                ]
+                s_cols += [
+                    f'{month_src}_YS_売上', f'{month_src}_楽天_売上', f'{month_src}_Amazon_売上',
+                    f'{month_dst}_YS_売上', f'{month_dst}_楽天_売上', f'{month_dst}_Amazon_売上'
+                ]
             
             # 安全な型変換
             tmp_d = d.copy()
             for c in cols:
-                if c in tmp_d.columns:
-                    # 数値列のみ整数に変換するよう、列名を指定して処理を分けます
-                    if c in ['YS_売上','楽天_売上','Amazon_売上','現在の在庫数','在庫金額', '合計売上', '機会損失スコア']:
-                        tmp_d[c] = pd.to_numeric(tmp_d[c], errors='coerce').fillna(0).astype(int)
+                if c in tmp_d.columns and c != '偏り状況':
+                    tmp_d[c] = pd.to_numeric(tmp_d[c], errors='coerce').fillna(0).astype(int)
             
-            return tmp_d.style.format({c: "{:,}" for c in cols if c in tmp_d.columns and c != '偏り状況'}).map(
-                lambda v: 'color: #FF4B4B; font-weight: bold;' if v == 0 else ('color: #0099FF;' if v > 0 else ''),
-                subset=[c for c in s_cols if c in tmp_d.columns]
-            )
+            style_obj = tmp_d.style.format({c: "{:,}" for c in cols if c in tmp_d.columns and c != '偏り状況'})
+            
+            # 配色ルール: 売上0=赤, 売上あり=青
+            # 変化量: プラス=青, マイナス=赤
+            def get_color_map(val, is_diff=False):
+                if is_diff:
+                    if val > 0: return 'color: #0099FF; font-weight: bold;'
+                    elif val < 0: return 'color: #FF4B4B; font-weight: bold;'
+                    return ''
+                else:
+                    if val == 0: return 'color: #FF4B4B; font-weight: bold;'
+                    elif val > 0: return 'color: #0099FF;'
+                    return ''
+            
+            for c in s_cols:
+                if c in tmp_d.columns:
+                    style_obj = style_obj.map(lambda v: get_color_map(v), subset=[c])
+            
+            if '売上変化量' in tmp_d.columns:
+                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上変化量'])
+            
+            return style_obj
             
 
         if not target_df.empty:
