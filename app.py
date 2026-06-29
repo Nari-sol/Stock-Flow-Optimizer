@@ -130,9 +130,10 @@ def load_all_data(master_file, ys_files, rk_files, az_files):
             '現在の在庫数': ['残数量', '在庫数'],
             '在庫評価単価': ['在庫評価単価', '単価', '評価単価']
         })
-        m_raw['在庫金額'] = m_raw.get('現在の在庫数', 0).apply(clean_num) * m_raw.get('在庫評価単価', 0).apply(clean_num)
+        m_raw['在庫評価単価'] = m_raw.get('在庫評価単価', 0).apply(clean_num)
+        m_raw['在庫金額'] = m_raw.get('現在の在庫数', 0).apply(clean_num) * m_raw['在庫評価単価']
         m_raw['カテゴリ'] = m_raw.get('商品名', '不明').apply(categorize_item)
-        df_master = process_and_aggregate_df(m_raw, ['現在の在庫数', '在庫金額'], ['カテゴリ'])
+        df_master = process_and_aggregate_df(m_raw, ['現在の在庫数', '在庫金額'], ['カテゴリ', '在庫評価単価'])
 
         # 2. 各モール
         # 各モールデータ読み込み（シートごとに月を付与）
@@ -353,7 +354,7 @@ if master_f:
             })
             
             # マスター情報（月情報を含まないユニークなもの）
-            df_meta = df[['SKU', 'カテゴリ', '現在の在庫数', '在庫金額']].drop_duplicates(subset=['SKU']).copy()
+            df_meta = df[['SKU', 'カテゴリ', '現在の在庫数', '在庫金額', '在庫評価単価']].drop_duplicates(subset=['SKU']).copy()
             
             # マージ
             target_df = pd.merge(df_meta, df_src, on='SKU', how='left')
@@ -364,23 +365,32 @@ if master_f:
             target_df[f'{month_src}_合計売上'] = target_df[f'{month_src}_YS_売上'] + target_df[f'{month_src}_楽天_売上'] + target_df[f'{month_src}_Amazon_売上']
             target_df[f'{month_dst}_合計売上'] = target_df[f'{month_dst}_YS_売上'] + target_df[f'{month_dst}_楽天_売上'] + target_df[f'{month_dst}_Amazon_売上']
             
+            # 合計売上金額の計算
+            target_df[f'{month_src}_合計売上金額'] = target_df[f'{month_src}_合計売上'] * target_df['在庫評価単価']
+            target_df[f'{month_dst}_合計売上金額'] = target_df[f'{month_dst}_合計売上'] * target_df['在庫評価単価']
+            
             # 売上変化量（施策前後の差分）
             target_df['売上変化量'] = target_df[f'{month_dst}_合計売上'] - target_df[f'{month_src}_合計売上']
+            target_df['売上金額変化量'] = target_df[f'{month_dst}_合計売上金額'] - target_df[f'{month_src}_合計売上金額']
             
             # 変化量順にソート
             target_df = target_df.sort_values('売上変化量', ascending=False)
 
         # サマリー
         st.subheader("📊 分析サマリー")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("抽出品番数", f"{len(target_df)} 件")
-        c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
-        c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
-        
         if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("抽出品番数", f"{len(target_df)} 件")
+            c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
+            c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
             c4.metric("対象品合計売上", f"{int(target_df[['YS_売上','楽天_売上','Amazon_売上']].sum().sum()):,}")
         else:
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("抽出品番数", f"{len(target_df)} 件")
+            c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
+            c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
             c4.metric("総売上変化量", f"{int(target_df['売上変化量'].sum()):+}")
+            c5.metric("総売上金額変化量", f"¥ {int(target_df['売上金額変化量'].sum()):+}")
 
         # スタイリング表示
         def style_df(d):
@@ -393,8 +403,10 @@ if master_f:
             else:
                 cols += [
                     f'{month_src}_YS_売上', f'{month_src}_楽天_売上', f'{month_src}_Amazon_売上', f'{month_src}_合計売上',
+                    f'{month_src}_合計売上金額',
                     f'{month_dst}_YS_売上', f'{month_dst}_楽天_売上', f'{month_dst}_Amazon_売上', f'{month_dst}_合計売上',
-                    '売上変化量'
+                    f'{month_dst}_合計売上金額',
+                    '売上変化量', '売上金額変化量'
                 ]
                 s_cols += [
                     f'{month_src}_YS_売上', f'{month_src}_楽天_売上', f'{month_src}_Amazon_売上',
@@ -427,6 +439,8 @@ if master_f:
             
             if '売上変化量' in tmp_d.columns:
                 style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上変化量'])
+            if '売上金額変化量' in tmp_d.columns:
+                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上金額変化量'])
             
             return style_obj
             
