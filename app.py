@@ -390,8 +390,16 @@ if master_f:
             # テーブル表示
             if not target_df.empty:
                 st.dataframe(style_df(target_df), use_container_width=True)
-                csv = target_df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📄 CSVダウンロード", csv, f"result_{pd.Timestamp.now():%Y%m%d}.csv", "text/csv")
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    target_df.to_excel(writer, index=False)
+                excel_data = buffer.getvalue()
+                st.download_button(
+                    label="📄 Excelダウンロード",
+                    data=excel_data,
+                    file_name=f"result_{pd.Timestamp.now():%Y%m%d}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             else:
                 st.info("対象データはありません。")
 
@@ -459,8 +467,16 @@ if master_f:
                 # テーブル表示
                 if not target_df.empty:
                     st.dataframe(style_df(target_df), use_container_width=True)
-                    csv = target_df.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button("📄 CSVダウンロード", csv, f"result_{pd.Timestamp.now():%Y%m%d}.csv", "text/csv")
+                    buffer = io.BytesIO()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        target_df.to_excel(writer, index=False)
+                    excel_data = buffer.getvalue()
+                    st.download_button(
+                        label="📄 Excelダウンロード",
+                        data=excel_data,
+                        file_name=f"result_{pd.Timestamp.now():%Y%m%d}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
                 else:
                     st.info("対象データはありません。")
 else:
