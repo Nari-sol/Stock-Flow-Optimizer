@@ -288,6 +288,58 @@ if master_f:
         
         unique_months = sorted(df['月'].unique())
 
+        # スタイリング関数の定義
+        def style_df(d):
+            cols = ['現在の在庫数', '在庫金額', '偏り状況']
+            s_cols = []
+            
+            if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
+                cols += ['YS_売上','楽天_売上','Amazon_売上', '合計売上', '機会損失スコア']
+                s_cols += ['YS_売上','楽天_売上','Amazon_売上']
+            else:
+                cols += [
+                    '比較元_YS_売上', '比較元_楽天_売上', '比較元_Amazon_売上', '比較元_合計売上',
+                    '比較元_合計売上金額',
+                    '比較先_YS_売上', '比較先_楽天_売上', '比較先_Amazon_売上', '比較先_合計売上',
+                    '比較先_合計売上金額',
+                    '売上個数変化量', '売上金額変化量'
+                ]
+                s_cols += [
+                    '比較元_YS_売上', '比較元_楽天_売上', '比較元_Amazon_売上',
+                    '比較先_YS_売上', '比較先_楽天_売上', '比較先_Amazon_売上'
+                ]
+            
+            # 安全な型変換
+            tmp_d = d.copy()
+            for c in cols:
+                if c in tmp_d.columns and c != '偏り状況':
+                    tmp_d[c] = pd.to_numeric(tmp_d[c], errors='coerce').fillna(0).astype(int)
+            
+            style_obj = tmp_d.style.format({c: "{:,}" for c in cols if c in tmp_d.columns and c != '偏り状況'})
+            
+            # 配色ルール: 売上0=赤, 売上あり=青
+            # 変化量: プラス=青, マイナス=赤
+            def get_color_map(val, is_diff=False):
+                if is_diff:
+                    if val > 0: return 'color: #0099FF; font-weight: bold;'
+                    elif val < 0: return 'color: #FF4B4B; font-weight: bold;'
+                    return ''
+                else:
+                    if val == 0: return 'color: #FF4B4B; font-weight: bold;'
+                    elif val > 0: return 'color: #0099FF;'
+                    return ''
+            
+            for c in s_cols:
+                if c in tmp_d.columns:
+                    style_obj = style_obj.map(lambda v: get_color_map(v), subset=[c])
+            
+            if '売上個数変化量' in tmp_d.columns:
+                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上個数変化量'])
+            if '売上金額変化量' in tmp_d.columns:
+                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上金額変化量'])
+            
+            return style_obj
+
         if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
             # 通常モード: 表示対象の月を1つ選択
             selected_month = st.selectbox("📅 表示対象の月を選択", unique_months, index=0)
@@ -327,129 +379,89 @@ if master_f:
                 # スコア順に並び替え
                 target_df = target_df.sort_values('機会損失スコア', ascending=False)
 
-        else: # 月別効果検証（比較）
-            st.info("**【月別効果検証モード】**\n* **概要**: 選択した2つの月における売上の変化（伸び率や他モールへの波及効果）を品番ごとに比較検証します。")
-            col_m1, col_m2 = st.columns(2)
-            with col_m1:
-                month_src = st.selectbox("📅 比較元（施策前）の月", unique_months, index=0)
-            with col_m2:
-                # デフォルトで比較元の次の月を選択（あれば）
-                default_dest_idx = min(unique_months.index(month_src) + 1, len(unique_months) - 1) if month_src in unique_months else 0
-                month_dst = st.selectbox("📅 比較先（施策後）の月", unique_months, index=default_dest_idx)
-
-            # 比較元のデータを抽出
-            df_src = df[df['月'] == month_src][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
-            df_src = df_src.rename(columns={
-                'YS_売上': f'{month_src}_YS_売上',
-                '楽天_売上': f'{month_src}_楽天_売上',
-                'Amazon_売上': f'{month_src}_Amazon_売上'
-            })
-            
-            # 比較先のデータを抽出
-            df_dst = df[df['月'] == month_dst][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
-            df_dst = df_dst.rename(columns={
-                'YS_売上': f'{month_dst}_YS_売上',
-                '楽天_売上': f'{month_dst}_楽天_売上',
-                'Amazon_売上': f'{month_dst}_Amazon_売上'
-            })
-            
-            # マスター情報（月情報を含まないユニークなもの）
-            df_meta = df[['SKU', 'カテゴリ', '現在の在庫数', '在庫金額', '在庫評価単価']].drop_duplicates(subset=['SKU']).copy()
-            
-            # マージ
-            target_df = pd.merge(df_meta, df_src, on='SKU', how='left')
-            target_df = pd.merge(target_df, df_dst, on='SKU', how='left')
-            target_df = target_df.fillna(0)
-            
-            # 合計売上の計算
-            target_df[f'{month_src}_合計売上'] = target_df[f'{month_src}_YS_売上'] + target_df[f'{month_src}_楽天_売上'] + target_df[f'{month_src}_Amazon_売上']
-            target_df[f'{month_dst}_合計売上'] = target_df[f'{month_dst}_YS_売上'] + target_df[f'{month_dst}_楽天_売上'] + target_df[f'{month_dst}_Amazon_売上']
-            
-            # 合計売上金額の計算
-            target_df[f'{month_src}_合計売上金額'] = target_df[f'{month_src}_合計売上'] * target_df['在庫評価単価']
-            target_df[f'{month_dst}_合計売上金額'] = target_df[f'{month_dst}_合計売上'] * target_df['在庫評価単価']
-            
-            # 売上変化量（施策前後の差分）
-            target_df['売上変化量'] = target_df[f'{month_dst}_合計売上'] - target_df[f'{month_src}_合計売上']
-            target_df['売上金額変化量'] = target_df[f'{month_dst}_合計売上金額'] - target_df[f'{month_src}_合計売上金額']
-            
-            # 変化量順にソート
-            target_df = target_df.sort_values('売上変化量', ascending=False)
-
-        # サマリー
-        st.subheader("📊 分析サマリー")
-        if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
+            # 通常モードのサマリー
+            st.subheader("📊 分析サマリー")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("抽出品番数", f"{len(target_df)} 件")
             c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
             c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
             c4.metric("対象品合計売上", f"{int(target_df[['YS_売上','楽天_売上','Amazon_売上']].sum().sum()):,}")
-        else:
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("抽出品番数", f"{len(target_df)} 件")
-            c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
-            c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
-            c4.metric("総売上変化量", f"{int(target_df['売上変化量'].sum()):+}")
-            c5.metric("総売上金額変化量", f"¥ {int(target_df['売上金額変化量'].sum()):+}")
 
-        # スタイリング表示
-        def style_df(d):
-            cols = ['現在の在庫数', '在庫金額', '偏り状況']
-            s_cols = []
-            
-            if mode in ["滞留在庫の抽出", "需要の偏りを抽出"]:
-                cols += ['YS_売上','楽天_売上','Amazon_売上', '合計売上', '機会損失スコア']
-                s_cols += ['YS_売上','楽天_売上','Amazon_売上']
+            # テーブル表示
+            if not target_df.empty:
+                st.dataframe(style_df(target_df), use_container_width=True)
+                csv = target_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📄 CSVダウンロード", csv, f"result_{pd.Timestamp.now():%Y%m%d}.csv", "text/csv")
             else:
-                cols += [
-                    f'{month_src}_YS_売上', f'{month_src}_楽天_売上', f'{month_src}_Amazon_売上', f'{month_src}_合計売上',
-                    f'{month_src}_合計売上金額',
-                    f'{month_dst}_YS_売上', f'{month_dst}_楽天_売上', f'{month_dst}_Amazon_売上', f'{month_dst}_合計売上',
-                    f'{month_dst}_合計売上金額',
-                    '売上変化量', '売上金額変化量'
-                ]
-                s_cols += [
-                    f'{month_src}_YS_売上', f'{month_src}_楽天_売上', f'{month_src}_Amazon_売上',
-                    f'{month_dst}_YS_売上', f'{month_dst}_楽天_売上', f'{month_dst}_Amazon_売上'
-                ]
-            
-            # 安全な型変換
-            tmp_d = d.copy()
-            for c in cols:
-                if c in tmp_d.columns and c != '偏り状況':
-                    tmp_d[c] = pd.to_numeric(tmp_d[c], errors='coerce').fillna(0).astype(int)
-            
-            style_obj = tmp_d.style.format({c: "{:,}" for c in cols if c in tmp_d.columns and c != '偏り状況'})
-            
-            # 配色ルール: 売上0=赤, 売上あり=青
-            # 変化量: プラス=青, マイナス=赤
-            def get_color_map(val, is_diff=False):
-                if is_diff:
-                    if val > 0: return 'color: #0099FF; font-weight: bold;'
-                    elif val < 0: return 'color: #FF4B4B; font-weight: bold;'
-                    return ''
-                else:
-                    if val == 0: return 'color: #FF4B4B; font-weight: bold;'
-                    elif val > 0: return 'color: #0099FF;'
-                    return ''
-            
-            for c in s_cols:
-                if c in tmp_d.columns:
-                    style_obj = style_obj.map(lambda v: get_color_map(v), subset=[c])
-            
-            if '売上変化量' in tmp_d.columns:
-                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上変化量'])
-            if '売上金額変化量' in tmp_d.columns:
-                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上金額変化量'])
-            
-            return style_obj
-            
+                st.info("対象データはありません。")
 
-        if not target_df.empty:
-            st.dataframe(style_df(target_df), use_container_width=True)
-            csv = target_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📄 CSVダウンロード", csv, f"result_{pd.Timestamp.now():%Y%m%d}.csv", "text/csv")
-        else:
-            st.info("対象データはありません。")
+        else: # 月別効果検証（比較）
+            st.info("**【月別効果検証モード】**\n* **概要**: 選択した複数月の期間における売上の変化（個数・金額）を品番ごとに比較検証します。")
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                months_src = st.multiselect("📅 比較元（施策前）の月", unique_months, default=None)
+            with col_m2:
+                months_dst = st.multiselect("📅 比較先（施策後）の月", unique_months, default=None)
+
+            if not months_src or not months_dst:
+                st.warning("⚠️ 比較元（施策前）と比較先（施策後）の月をそれぞれ1つ以上選択してください。")
+            else:
+                # 比較元のデータを抽出して集計
+                df_src = df[df['月'].isin(months_src)][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
+                df_src = df_src.groupby('SKU').sum().reset_index()
+                df_src = df_src.rename(columns={
+                    'YS_売上': '比較元_YS_売上',
+                    '楽天_売上': '比較元_楽天_売上',
+                    'Amazon_売上': '比較元_Amazon_売上'
+                })
+                
+                # 比較先のデータを抽出して集計
+                df_dst = df[df['月'].isin(months_dst)][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
+                df_dst = df_dst.groupby('SKU').sum().reset_index()
+                df_dst = df_dst.rename(columns={
+                    'YS_売上': '比較先_YS_売上',
+                    '楽天_売上': '比較先_楽天_売上',
+                    'Amazon_売上': '比較先_Amazon_売上'
+                })
+                
+                # マスター情報（月情報を含まないユニークなもの）
+                df_meta = df[['SKU', 'カテゴリ', '現在の在庫数', '在庫金額', '在庫評価単価']].drop_duplicates(subset=['SKU']).copy()
+                
+                # マージ
+                target_df = pd.merge(df_meta, df_src, on='SKU', how='left')
+                target_df = pd.merge(target_df, df_dst, on='SKU', how='left')
+                target_df = target_df.fillna(0)
+                
+                # 合計売上の計算
+                target_df['比較元_合計売上'] = target_df['比較元_YS_売上'] + target_df['比較元_楽天_売上'] + target_df['比較元_Amazon_売上']
+                target_df['比較先_合計売上'] = target_df['比較先_YS_売上'] + target_df['比較先_楽天_売上'] + target_df['比較先_Amazon_売上']
+                
+                # 合計売上金額の計算
+                target_df['比較元_合計売上金額'] = target_df['比較元_合計売上'] * target_df['在庫評価単価']
+                target_df['比較先_合計売上金額'] = target_df['比較先_合計売上'] * target_df['在庫評価単価']
+                
+                # 売上個数変化量・売上金額変化量の計算
+                target_df['売上個数変化量'] = target_df['比較先_合計売上'] - target_df['比較元_合計売上']
+                target_df['売上金額変化量'] = target_df['比較先_合計売上金額'] - target_df['比較元_合計売上金額']
+                
+                # 変化量順にソート (個数の変化量を基準)
+                target_df = target_df.sort_values('売上個数変化量', ascending=False)
+
+                # 月別効果検証用のサマリー
+                st.subheader("📊 分析サマリー")
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("抽出品番数", f"{len(target_df)} 件")
+                c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
+                c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
+                c4.metric("総売上個数変化量", f"{int(target_df['売上個数変化量'].sum()):+}")
+                c5.metric("総売上金額変化量", f"¥ {int(target_df['売上金額変化量'].sum()):+}")
+
+                # テーブル表示
+                if not target_df.empty:
+                    st.dataframe(style_df(target_df), use_container_width=True)
+                    csv = target_df.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button("📄 CSVダウンロード", csv, f"result_{pd.Timestamp.now():%Y%m%d}.csv", "text/csv")
+                else:
+                    st.info("対象データはありません。")
 else:
     st.info("👈 サイドバーからCSVをアップロードしてください。")
