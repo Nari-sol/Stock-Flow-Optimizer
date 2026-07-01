@@ -44,19 +44,6 @@ def clean_num(val):
     except:
         return 0.0
 
-def categorize_item(name):
-    """商品名からカテゴリを自動判定"""
-    CATEGORY_MAP = {
-        "IGNITION COIL": "イグニッションコイル",
-        "BRAKE": "ブレーキ関連",
-        "RADIATOR": "ラジエーター関連",
-        "ALTERNATOR": "オルタネーター関連"
-    }
-    n = str(name).upper()
-    for kw, label in CATEGORY_MAP.items():
-        if kw in n: return label
-    return "その他"
-
 # -----------------------------------------------------------------------------
 # データ処理の核
 # -----------------------------------------------------------------------------
@@ -132,7 +119,7 @@ def load_all_data(master_file, ys_files, rk_files, az_files):
         })
         m_raw['在庫評価単価'] = m_raw.get('在庫評価単価', 0).apply(clean_num)
         m_raw['在庫金額'] = m_raw.get('現在の在庫数', 0).apply(clean_num) * m_raw['在庫評価単価']
-        m_raw['カテゴリ'] = m_raw.get('商品名', '不明').apply(categorize_item)
+        m_raw['カテゴリ'] = m_raw.get('商品名', '不明').fillna('不明')
         df_master = process_and_aggregate_df(m_raw, ['現在の在庫数', '在庫金額'], ['カテゴリ', '在庫評価単価'])
 
         # 2. 各モール
@@ -279,8 +266,8 @@ if master_f:
     df = load_all_data(master_f, ys_fs, rk_fs, az_fs)
     if df is not None:
         # カテゴリフィルタ
-        unique_cats = sorted(df['カテゴリ'].unique())
-        sel_cats = st.sidebar.multiselect("🔎 カテゴリ絞り込み", unique_cats)
+        unique_cats = sorted(df['カテゴリ'].astype(str).unique())
+        sel_cats = st.sidebar.multiselect("🔎 商品名で絞り込み", unique_cats)
         if sel_cats: df = df[df['カテゴリ'].isin(sel_cats)]
 
         st.write("---")
@@ -297,17 +284,7 @@ if master_f:
                 cols += ['YS_売上','楽天_売上','Amazon_売上', '合計売上', '機会損失スコア']
                 s_cols += ['YS_売上','楽天_売上','Amazon_売上']
             else:
-                cols += [
-                    '比較元_YS_売上', '比較元_楽天_売上', '比較元_Amazon_売上', '比較元_合計売上',
-                    '比較元_合計売上金額',
-                    '比較先_YS_売上', '比較先_楽天_売上', '比較先_Amazon_売上', '比較先_合計売上',
-                    '比較先_合計売上金額',
-                    '売上個数変化量', '売上金額変化量'
-                ]
-                s_cols += [
-                    '比較元_YS_売上', '比較元_楽天_売上', '比較元_Amazon_売上',
-                    '比較先_YS_売上', '比較先_楽天_売上', '比較先_Amazon_売上'
-                ]
+                cols += ['比較元の合計売上', '比較先の合計売上', '変化量']
             
             # 安全な型変換
             tmp_d = d.copy()
@@ -333,10 +310,8 @@ if master_f:
                 if c in tmp_d.columns:
                     style_obj = style_obj.map(lambda v: get_color_map(v), subset=[c])
             
-            if '売上個数変化量' in tmp_d.columns:
-                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上個数変化量'])
-            if '売上金額変化量' in tmp_d.columns:
-                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['売上金額変化量'])
+            if '変化量' in tmp_d.columns:
+                style_obj = style_obj.map(lambda v: get_color_map(v, is_diff=True), subset=['変化量'])
             
             return style_obj
 
@@ -404,65 +379,49 @@ if master_f:
                 st.info("対象データはありません。")
 
         else: # 月別効果検証（比較）
-            st.info("**【月別効果検証モード】**\n* **概要**: 選択した複数月の期間における売上の変化（個数・金額）を品番ごとに比較検証します。")
+            st.info("**【月別効果検証モード】**\n* **概要**: 施策前後の2つの月を選択し、その売上の変化を比較検証します。")
             col_m1, col_m2 = st.columns(2)
             with col_m1:
-                months_src = st.multiselect("📅 比較元（施策前）の月", unique_months, default=None)
+                month_src = st.selectbox("📅 比較元（施策前）の月を選択", ["選択してください"] + unique_months)
             with col_m2:
-                months_dst = st.multiselect("📅 比較先（施策後）の月", unique_months, default=None)
+                month_dst = st.selectbox("📅 比較先（施策後）の月を選択", ["選択してください"] + unique_months)
 
-            if not months_src or not months_dst:
-                st.warning("⚠️ 比較元（施策前）と比較先（施策後）の月をそれぞれ1つ以上選択してください。")
+            if month_src == "選択してください" or month_dst == "選択してください":
+                st.warning("⚠️ 比較元（施策前）と比較先（施策後）の月をそれぞれ選択してください。")
             else:
                 # 比較元のデータを抽出して集計
-                df_src = df[df['月'].isin(months_src)][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
-                df_src = df_src.groupby('SKU').sum().reset_index()
-                df_src = df_src.rename(columns={
-                    'YS_売上': '比較元_YS_売上',
-                    '楽天_売上': '比較元_楽天_売上',
-                    'Amazon_売上': '比較元_Amazon_売上'
-                })
+                df_src = df[df['月'] == month_src][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
+                df_src['比較元の合計売上'] = df_src['YS_売上'] + df_src['楽天_売上'] + df_src['Amazon_売上']
+                df_src = df_src.groupby('SKU')[['比較元の合計売上']].sum().reset_index()
                 
                 # 比較先のデータを抽出して集計
-                df_dst = df[df['月'].isin(months_dst)][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
-                df_dst = df_dst.groupby('SKU').sum().reset_index()
-                df_dst = df_dst.rename(columns={
-                    'YS_売上': '比較先_YS_売上',
-                    '楽天_売上': '比較先_楽天_売上',
-                    'Amazon_売上': '比較先_Amazon_売上'
-                })
+                df_dst = df[df['月'] == month_dst][['SKU', 'YS_売上', '楽天_売上', 'Amazon_売上']].copy()
+                df_dst['比較先の合計売上'] = df_dst['YS_売上'] + df_dst['楽天_売上'] + df_dst['Amazon_売上']
+                df_dst = df_dst.groupby('SKU')[['比較先の合計売上']].sum().reset_index()
                 
                 # マスター情報（月情報を含まないユニークなもの）
-                df_meta = df[['SKU', 'カテゴリ', '現在の在庫数', '在庫金額', '在庫評価単価']].drop_duplicates(subset=['SKU']).copy()
+                df_meta = df[['SKU', 'カテゴリ', '現在の在庫数']].drop_duplicates(subset=['SKU']).copy()
                 
                 # マージ
                 target_df = pd.merge(df_meta, df_src, on='SKU', how='left')
                 target_df = pd.merge(target_df, df_dst, on='SKU', how='left')
                 target_df = target_df.fillna(0)
                 
-                # 合計売上の計算
-                target_df['比較元_合計売上'] = target_df['比較元_YS_売上'] + target_df['比較元_楽天_売上'] + target_df['比較元_Amazon_売上']
-                target_df['比較先_合計売上'] = target_df['比較先_YS_売上'] + target_df['比較先_楽天_売上'] + target_df['比較先_Amazon_売上']
+                # 変化量の計算
+                target_df['変化量'] = target_df['比較先の合計売上'] - target_df['比較元の合計売上']
                 
-                # 合計売上金額の計算
-                target_df['比較元_合計売上金額'] = target_df['比較元_合計売上'] * target_df['在庫評価単価']
-                target_df['比較先_合計売上金額'] = target_df['比較先_合計売上'] * target_df['在庫評価単価']
+                # 表示列を絞る（ユーザー指定）
+                target_df = target_df[['SKU', 'カテゴリ', '比較元の合計売上', '比較先の合計売上', '変化量', '現在の在庫数']]
                 
-                # 売上個数変化量・売上金額変化量の計算
-                target_df['売上個数変化量'] = target_df['比較先_合計売上'] - target_df['比較元_合計売上']
-                target_df['売上金額変化量'] = target_df['比較先_合計売上金額'] - target_df['比較元_合計売上金額']
-                
-                # 変化量順にソート (個数の変化量を基準)
-                target_df = target_df.sort_values('売上個数変化量', ascending=False)
+                # 変化量順にソート
+                target_df = target_df.sort_values('変化量', ascending=False)
 
                 # 月別効果検証用のサマリー
                 st.subheader("📊 分析サマリー")
-                c1, c2, c3, c4, c5 = st.columns(5)
+                c1, c2, c3 = st.columns(3)
                 c1.metric("抽出品番数", f"{len(target_df)} 件")
                 c2.metric("総在庫数", f"{int(target_df['現在の在庫数'].sum()):,}")
-                c3.metric("総在庫金額", f"¥ {int(target_df['在庫金額'].sum()):,}")
-                c4.metric("総売上個数変化量", f"{int(target_df['売上個数変化量'].sum()):+}")
-                c5.metric("総売上金額変化量", f"¥ {int(target_df['売上金額変化量'].sum()):+}")
+                c3.metric("総売上変化量", f"{int(target_df['変化量'].sum()):+}")
 
                 # テーブル表示
                 if not target_df.empty:
